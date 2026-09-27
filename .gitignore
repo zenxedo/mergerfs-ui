@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+.env.*
+*.env
+*.key
+*.pem
+*secret*
+
+# Python / build junk
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs / transient
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

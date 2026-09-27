@@ -1,0 +1,20 @@
+# Version control / editor noise
+.git
+.gitignore
+.github
+.idea
+.vscode
+
+# Runtime / Python junk (never baked into the image)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+*secret*
