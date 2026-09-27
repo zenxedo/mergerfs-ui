@@ -9,9 +9,24 @@ from collections import deque
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 
-# Configuration: Path to the mergerfs-tools source directory
-TOOLS_DIR = "/app/tools/src"
+# Configuration (env-overridable so the image is not tied to a single host)
+TOOLS_DIR = os.environ.get("MERGERFS_TOOLS_DIR", "/app/tools/src")
+# Mount path of the mergerfs pool inside the container (e.g. /mnt/pool). When
+# unset, a pool is detected by a filesystem type containing "mergerfs".
+POOL_MOUNT = os.environ.get("MERGERFS_POOL_MOUNT", "").strip()
+# Optional caption shown under the pool total (defaults to a drive count).
+POOL_LABEL = os.environ.get("MERGERFS_POOL_LABEL", "").strip()
+PORT = int(os.environ.get("PORT", "8480"))
+TOOL_NAME_RE = re.compile(r"mergerfs\.(balance|consolidate|ctl|dedup|dup|fsck|mktrash)")
 app = FastAPI()
+
+
+def same_origin(request: Request) -> bool:
+    """Reject cross-site posts (CSRF). Header-less clients (e.g. curl) are allowed."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    return origin.split("://", 1)[-1] == request.headers.get("host", "")
 
 # Global memory state
 DISK_STATS_HISTORY = {}
@@ -197,7 +212,7 @@ def get_storage_data():
         if len(parts) < 6: continue
         filesystem, size, used, avail, use_pct, mount = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
         if filesystem == "overlay" or mount.startswith("/var/lib/docker") or filesystem == "shm": continue
-        if "mergerfs" in filesystem or mount.startswith("/mnt/node304"):
+        if "mergerfs" in filesystem.lower() or (POOL_MOUNT and mount.startswith(POOL_MOUNT)):
             pool_metrics = {"size": size, "used": used, "avail": avail, "use_pct": use_pct}
             continue
         if "/dev/sd" in filesystem or "disk" in mount or mount == "/":
@@ -435,8 +450,10 @@ def api_tool_status(tool: str):
     return {"running": is_running, "logs": "".join(logs_list)}
 
 @app.post("/api/stop/{tool}")
-def api_stop_tool(tool: str):
+def api_stop_tool(tool: str, request: Request):
     global ACTIVE_PROCESSES
+    if not same_origin(request):
+        return JSONResponse(status_code=403, content={"detail": "cross-origin request rejected"})
     process = ACTIVE_PROCESSES.get(tool)
     if process and process.poll() is None:
         try:
@@ -450,7 +467,8 @@ def api_stop_tool(tool: str):
 def home():
     drives, pool = get_storage_data()
     sys_init = get_system_metrics()
-    
+    pool_caption = POOL_LABEL or f"{len(drives)} drives detected"
+
     metrics_html = f"""
     <div class="row g-3 mb-4">
         <div class="col-md-4">
@@ -458,7 +476,7 @@ def home():
                 <span class="metric-label">Total Pool Capacity</span>
                 <span class="metric-value" id="pool-size">{pool['size']}</span>
                 <span class="sub-metrics" id="pool-sub">{pool['used']} Used / {pool['avail']} Available</span>
-                <small class="text-info mt-1 fw-bold" style="font-size:0.75rem;">6 Pool Drives + 1 Dedicated Boot SSD</small>
+                <small class="text-info mt-1 fw-bold" style="font-size:0.75rem;">{pool_caption}</small>
             </div>
         </div>
         <div class="col-md-4">
@@ -623,6 +641,8 @@ def tool_form(tool: str):
 @app.post("/run/{tool}")
 async def run_tool(tool: str, request: Request):
     global ACTIVE_PROCESSES, PROCESS_LOGS
+    if not same_origin(request):
+        return JSONResponse(status_code=403, content={"detail": "cross-origin request rejected"})
     if tool in ACTIVE_PROCESSES and ACTIVE_PROCESSES[tool].poll() is None:
         def stream_existing():
             yield "--- RE-ATTACHED TO RUNNING PROCESS ---\\n\\n"
@@ -634,8 +654,10 @@ async def run_tool(tool: str, request: Request):
     manual_cmd = form.get("__manual_cmd")
     if manual_cmd and manual_cmd.strip():
         cmd = shlex.split(manual_cmd)
-        if not cmd[0].startswith("mergerfs."): cmd = ["python3", os.path.join(TOOLS_DIR, tool)] + cmd
-        else: cmd = ["python3", os.path.join(TOOLS_DIR, cmd[0])] + cmd[1:]
+        if cmd and TOOL_NAME_RE.fullmatch(cmd[0]):
+            cmd = ["python3", os.path.join(TOOLS_DIR, cmd[0])] + cmd[1:]
+        else:
+            cmd = ["python3", os.path.join(TOOLS_DIR, tool)] + cmd
     else:
         target = form.get("target_path", "").strip()
         cmd = ["python3", os.path.join(TOOLS_DIR, tool)]
@@ -667,4 +689,4 @@ async def run_tool(tool: str, request: Request):
     return StreamingResponse(stream_new(), media_type="text/plain")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8480)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
