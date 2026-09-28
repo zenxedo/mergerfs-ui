@@ -31,7 +31,7 @@ docker run -d \
   -p 8480:8480 \
   -e MERGERFS_POOL_MOUNT=/mnt/pool \
   -v /mnt:/mnt \
-  -v /dev:/dev \
+  -v /dev:/dev:ro \
   ghcr.io/zenxedo/mergerfs-ui:latest
 ```
 
@@ -53,8 +53,8 @@ services:
     volumes:
       # The pool and its member drives must be visible to the container.
       - /mnt:/mnt
-      # Needed for per-device info; read-only is usually enough for monitoring.
-      - /dev:/dev
+      # Read-only is enough for per-device info.
+      - /dev:/dev:ro
 ```
 
 ## Configuration
@@ -64,7 +64,7 @@ services:
 | `MERGERFS_POOL_MOUNT` | *(unset)* | Path where the mergerfs pool is mounted inside the container. When set, a mount at/under this path is shown as the pool. When unset, a filesystem whose type contains `mergerfs` is used. |
 | `MERGERFS_POOL_LABEL` | *(unset)* | Caption under "Total Pool Capacity". Defaults to a detected drive count. |
 | `MERGERFS_TOOLS_DIR` | `/app/tools/src` | Where the mergerfs-tools scripts live in the image. |
-| `PORT` | `8480` | HTTP port to listen on. |
+| `PORT` | `8480` | HTTP port to listen on (the healthcheck follows it). Change the published `ports:` mapping to match. |
 
 ## Mounts and privileges
 
@@ -72,7 +72,7 @@ services:
   drive stats and run the tools against it. Mount it read-only if you only want
   monitoring; the read-only tools still work, but `--execute` / `--fix` actions
   will fail.
-- **`/dev`** is used to read device information. Read-only is usually fine.
+- **`/dev`** is used to read device information; read-only is enough for that.
 - The container runs as **root**. Ownership-fixing tools (`mergerfs.fsck --fix`)
   and file operations need it; a non-root container cannot repair a pool whose
   files are owned by other users.
@@ -89,6 +89,9 @@ trusted-LAN tool:
 - Put it behind a reverse proxy that provides auth (Authelia, oauth2-proxy,
   Cloudflare Access, basic auth), or reach it over a VPN/Tailscale.
 - Mount only the paths the app actually needs.
+- The dashboard and `/api/metrics` also expose drive model/serial numbers and
+  host metrics (uptime, memory) unauthenticated — a stranger should know that
+  before exposing even behind a team proxy.
 - Cross-origin form posts are rejected, but that is not a substitute for auth.
 
 ## Destructive tools and hardlinks
@@ -102,6 +105,15 @@ across filesystems.
 - Prefer a dry run first (omit `--execute`) and read the commands it prints.
 - Know which files are hardlinked before you let a tool move them.
 - `--fix` and `--execute` act on real data; there is no undo.
+- `mergerfs.dup --prune` deletes extra copies, and `mergerfs.ctl add/remove/set`
+  reconfigures the live pool. Treat them as destructive too.
+
+## Image
+
+Built from `python:3.12-slim` with `rsync` added, and vendoring
+`mergerfs-tools` at a pinned commit (SHA256-verified at build time). The image
+is rebuilt on each release; OS packages may carry Debian CVEs that have no
+upstream fix yet, so rebuild to pick up security updates as they land.
 
 ## License
 
