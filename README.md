@@ -22,6 +22,14 @@ against paths you mount.
 - Background-run awareness: re-attaching to a running tool shows a badge and its
   captured log.
 
+## Screenshots
+
+![mergerfs-ui dashboard](docs/dashboard.png)
+
+Per-tool form with a live command preview and streamed output:
+
+![mergerfs-ui tool form](docs/tool-dup.png)
+
 ## Quick start
 
 ```sh
