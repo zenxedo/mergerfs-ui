@@ -1,4 +1,5 @@
 import os
+import html
 import subprocess
 import uvicorn
 import shlex
@@ -16,17 +17,27 @@ TOOLS_DIR = os.environ.get("MERGERFS_TOOLS_DIR", "/app/tools/src")
 POOL_MOUNT = os.environ.get("MERGERFS_POOL_MOUNT", "").strip()
 # Optional caption shown under the pool total (defaults to a drive count).
 POOL_LABEL = os.environ.get("MERGERFS_POOL_LABEL", "").strip()
-PORT = int(os.environ.get("PORT", "8480"))
-TOOL_NAME_RE = re.compile(r"mergerfs\.(balance|consolidate|ctl|dedup|dup|fsck|mktrash)")
+try:
+    PORT = int(os.environ.get("PORT", "8480"))
+except ValueError:
+    PORT = 8480
+TOOL_NAME_RE = re.compile(r"mergerfs\.(balance|consolidate|ctl|dedup|dup|fsck)")
 app = FastAPI()
 
 
 def same_origin(request: Request) -> bool:
-    """Reject cross-site posts (CSRF). Header-less clients (e.g. curl) are allowed."""
+    """Reject cross-site posts (CSRF); allow same-origin and header-less clients."""
+    host = request.headers.get("host", "")
+    site = request.headers.get("sec-fetch-site")
+    if site and site not in ("same-origin", "none"):
+        return False
     origin = request.headers.get("origin")
-    if not origin:
-        return True
-    return origin.split("://", 1)[-1] == request.headers.get("host", "")
+    if origin:
+        return origin.split("://", 1)[-1] == host
+    referer = request.headers.get("referer")
+    if referer:
+        return referer.split("://", 1)[-1].split("/", 1)[0] == host
+    return True
 
 # Global memory state
 DISK_STATS_HISTORY = {}
@@ -204,15 +215,16 @@ def get_storage_data():
     hw_map = get_hardware_maps()
     io_map = get_io_speeds()
     try:
-        df_output = subprocess.run(["df", "-h"], capture_output=True, text=True, check=True).stdout
+        df_output = subprocess.run(["df", "-hP"], capture_output=True, text=True, check=True).stdout
     except Exception: return [], {"size": "0", "used": "0", "avail": "0", "use_pct": "0%"}
     drives, pool_metrics, seen_mounts = [], {"size": "0", "used": "0", "avail": "0", "use_pct": "0%"}, set()
+    pool_prefix = POOL_MOUNT.rstrip("/") + "/"
     for line in df_output.strip().split("\n")[1:]:
-        parts = line.split()
+        parts = line.split(None, 5)
         if len(parts) < 6: continue
         filesystem, size, used, avail, use_pct, mount = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
         if filesystem == "overlay" or mount.startswith("/var/lib/docker") or filesystem == "shm": continue
-        if "mergerfs" in filesystem.lower() or (POOL_MOUNT and mount.startswith(POOL_MOUNT)):
+        if "mergerfs" in filesystem.lower() or (POOL_MOUNT and (mount == POOL_MOUNT or mount.startswith(pool_prefix))):
             pool_metrics = {"size": size, "used": used, "avail": avail, "use_pct": use_pct}
             continue
         if "/dev/sd" in filesystem or "disk" in mount or mount == "/":
@@ -226,7 +238,7 @@ def get_storage_data():
                 "mount": mount, "device": filesystem, "node": dev_node,
                 "model": hw_info["model"], "serial": hw_info["serial"], "size": size,
                 "used": used, "avail": avail, "use_pct": use_pct,
-                "pct_val": int(use_pct.replace("%", "")) if use_pct != "-" else 0,
+                "pct_val": int(use_pct.replace("%", "")) if use_pct.replace("%", "").isdigit() else 0,
                 "drive_status": status_data["status"], "status_color": status_data["color"],
                 "read_speed": io_data["read"], "write_speed": io_data["write"]
             })
@@ -444,6 +456,8 @@ def api_metrics():
 @app.get("/api/status/{tool}")
 def api_tool_status(tool: str):
     global ACTIVE_PROCESSES, PROCESS_LOGS
+    if tool not in TOOLS:
+        return JSONResponse(status_code=404, content={"detail": "unknown tool"})
     process = ACTIVE_PROCESSES.get(tool)
     is_running = process is not None and process.poll() is None
     logs_list = list(PROCESS_LOGS.get(tool, []))
@@ -454,6 +468,8 @@ def api_stop_tool(tool: str, request: Request):
     global ACTIVE_PROCESSES
     if not same_origin(request):
         return JSONResponse(status_code=403, content={"detail": "cross-origin request rejected"})
+    if tool not in TOOLS:
+        return JSONResponse(status_code=404, content={"detail": "unknown tool"})
     process = ACTIVE_PROCESSES.get(tool)
     if process and process.poll() is None:
         try:
@@ -474,26 +490,26 @@ def home():
         <div class="col-md-4">
             <div class="card p-3 text-center d-flex flex-column justify-content-center" style="height: 140px;">
                 <span class="metric-label">Total Pool Capacity</span>
-                <span class="metric-value" id="pool-size">{pool['size']}</span>
-                <span class="sub-metrics" id="pool-sub">{pool['used']} Used / {pool['avail']} Available</span>
-                <small class="text-info mt-1 fw-bold" style="font-size:0.75rem;">{pool_caption}</small>
+                <span class="metric-value" id="pool-size">{html.escape(pool['size'])}</span>
+                <span class="sub-metrics" id="pool-sub">{html.escape(pool['used'])} Used / {html.escape(pool['avail'])} Available</span>
+                <small class="text-info mt-1 fw-bold" style="font-size:0.75rem;">{html.escape(pool_caption)}</small>
             </div>
         </div>
         <div class="col-md-4">
             <div class="card p-3 text-center d-flex flex-column justify-content-center" style="height: 140px;">
                 <span class="metric-label">Pool Free Space</span>
-                <span class="metric-value text-info" id="pool-avail-box">{pool['avail']}</span>
+                <span class="metric-value text-info" id="pool-avail-box">{html.escape(pool['avail'])}</span>
                 <div class="progress mt-2 mx-3">
-                    <div class="progress-bar bg-warning" style="width: {pool['use_pct']}">Pool Usage: {pool['use_pct']}</div>
+                    <div class="progress-bar bg-warning" style="width: {html.escape(pool['use_pct'])}">Pool Usage: {html.escape(pool['use_pct'])}</div>
                 </div>
             </div>
         </div>
         <div class="col-md-4">
             <div class="card px-4 py-3 d-flex flex-column justify-content-center" style="height: 140px;">
-                <div class="sys-row"><span class="metric-label mb-0">Host Uptime:</span><span class="sys-val" id="sys-uptime">{sys_init['uptime']}</span></div>
-                <div class="sys-row"><span class="metric-label mb-0">CPU Load:</span><span class="sys-val" id="sys-cpu">{sys_init['cpu']} %</span></div>
-                <div class="sys-row"><span class="metric-label mb-0">Memory:</span><span class="sys-val" id="sys-ram">{sys_init['ram_used']} / {sys_init['ram_total']}</span></div>
-                <div class="sys-row"><span class="metric-label mb-0">OS Updates:</span><span class="sys-val text-warning" id="sys-updates">{sys_init['updates']} Pending</span></div>
+                <div class="sys-row"><span class="metric-label mb-0">Host Uptime:</span><span class="sys-val" id="sys-uptime">{html.escape(str(sys_init['uptime']))}</span></div>
+                <div class="sys-row"><span class="metric-label mb-0">CPU Load:</span><span class="sys-val" id="sys-cpu">{html.escape(str(sys_init['cpu']))} %</span></div>
+                <div class="sys-row"><span class="metric-label mb-0">Memory:</span><span class="sys-val" id="sys-ram">{html.escape(str(sys_init['ram_used']))} / {html.escape(str(sys_init['ram_total']))}</span></div>
+                <div class="sys-row"><span class="metric-label mb-0">OS Updates:</span><span class="sys-val text-warning" id="sys-updates">{html.escape(str(sys_init['updates']))} Pending</span></div>
             </div>
         </div>
     </div>
@@ -504,20 +520,20 @@ def home():
         progress_color = "bg-danger" if d['pct_val'] >= 90 else "bg-warning" if d['pct_val'] >= 75 else "bg-success"
         table_rows += f"""
         <tr>
-            <td class="fw-bold text-info">{d['mount']}</td>
-            <td><code>{d['device']}</code></td>
-            <td>{d['model']}</td>
-            <td><span class="font-monospace">{d['serial']}</span></td>
-            <td class="fw-bold text-white">{d['size']}</td>
-            <td class="fw-bold text-info">{d['avail']}</td>
-            <td class="{d['status_color']} fw-bold"><small>{d['drive_status']}</small></td>
+            <td class="fw-bold text-info">{html.escape(str(d['mount']))}</td>
+            <td><code>{html.escape(str(d['device']))}</code></td>
+            <td>{html.escape(str(d['model']))}</td>
+            <td><span class="font-monospace">{html.escape(str(d['serial']))}</span></td>
+            <td class="fw-bold text-white">{html.escape(str(d['size']))}</td>
+            <td class="fw-bold text-info">{html.escape(str(d['avail']))}</td>
+            <td class="{d['status_color']} fw-bold"><small>{html.escape(str(d['drive_status']))}</small></td>
             <td>
-                <div class="badge-io badge-read me-1" id="r-{d['node']}">R: {d['read_speed']} MB/s</div>
-                <div class="badge-io badge-write" id="w-{d['node']}">W: {d['write_speed']} MB/s</div>
+                <div class="badge-io badge-read me-1" id="r-{html.escape(str(d['node']))}">R: {d['read_speed']} MB/s</div>
+                <div class="badge-io badge-write" id="w-{html.escape(str(d['node']))}">W: {d['write_speed']} MB/s</div>
             </td>
             <td style="width: 15%;">
                 <div class="progress">
-                    <div class="progress-bar {progress_color}" style="width: {d['use_pct']}">{d['use_pct']}</div>
+                    <div class="progress-bar {progress_color}" style="width: {html.escape(str(d['use_pct']))}">{html.escape(str(d['use_pct']))}</div>
                 </div>
             </td>
         </tr>
@@ -569,7 +585,10 @@ def home():
 def tool_form(tool: str):
     if tool not in TOOLS: return page("Error", "Tool not defined.")
     config = TOOLS[tool]
-    help_text = subprocess.run(["python3", os.path.join(TOOLS_DIR, tool), "--help"], capture_output=True, text=True).stdout
+    try:
+        help_text = subprocess.run(["python3", os.path.join(TOOLS_DIR, tool), "--help"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        help_text = "(help text unavailable)"
     examples = TOOL_EXAMPLES.get(tool, [])
     
     fields = f"""
@@ -632,9 +651,9 @@ def tool_form(tool: str):
         
         <div class="section-title">5. Reference Guidance</div>
         <p class="fw-bold mb-1 mt-3 small text-white">Usage Examples:</p>
-        <pre class="ref-box">{"\\n".join(examples)}</pre>
+        <pre class="ref-box">{html.escape("\\n".join(examples))}</pre>
         <p class="fw-bold mb-1 mt-3 small text-white">Raw Help Text:</p>
-        <pre class="ref-box">{help_text}</pre>
+        <pre class="ref-box">{html.escape(help_text)}</pre>
     </div></div>"""
     return page(tool, body)
 
@@ -643,6 +662,8 @@ async def run_tool(tool: str, request: Request):
     global ACTIVE_PROCESSES, PROCESS_LOGS
     if not same_origin(request):
         return JSONResponse(status_code=403, content={"detail": "cross-origin request rejected"})
+    if tool not in TOOLS:
+        return JSONResponse(status_code=404, content={"detail": "unknown tool"})
     if tool in ACTIVE_PROCESSES and ACTIVE_PROCESSES[tool].poll() is None:
         def stream_existing():
             yield "--- RE-ATTACHED TO RUNNING PROCESS ---\\n\\n"
@@ -668,7 +689,11 @@ async def run_tool(tool: str, request: Request):
         else:
             for k, v in form.items():
                 if k in ["target_path", "__action", "__pos_arg", "__manual_cmd"] or not v: continue
-                if k == "verbose": cmd.append("-" + "v" * int(v))
+                if k == "verbose":
+                    try:
+                        cmd.append("-" + "v" * max(1, min(int(v), 3)))
+                    except ValueError:
+                        continue
                 elif v == "on": cmd.append(f"--{k}")
                 else: cmd += [f"--{k}", str(v).strip()]
             if target: cmd.append(target)
