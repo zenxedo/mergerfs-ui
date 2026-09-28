@@ -57,6 +57,16 @@ services:
       - /dev:/dev:ro
 ```
 
+## Image tags
+
+| Tag | What it is |
+|---|---|
+| `latest` | newest tagged release (stable). `0.1.0`, `0.1`, `0` are pinned equivalents. |
+| `edge` | built from the tip of `main` — newest, possibly unreleased. |
+| `sha-<short>` | the exact commit an `edge` build came from. |
+
+Pin `:0.1.0` (or a newer release) for production; use `:edge` to track `main`.
+
 ## Configuration
 
 | Env var | Default | Meaning |
